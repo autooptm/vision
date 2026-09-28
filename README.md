@@ -1,3 +1,69 @@
+<div align="center">
+  <a href="https://autooptm.com"><img src=".autooptm/logo.png" width="96" alt="AutoOptm"></a>
+
+  <h1>vision · optimized by <a href="https://autooptm.com">AutoOptm</a></h1>
+
+  <p><b>3.44x faster end to end</b> on the command below, output verified against the stock program.</p>
+
+  <p>
+    <a href="https://autooptm.com"><img alt="speedup" src="https://img.shields.io/badge/end--to--end-3.44x-2ea44f"></a>
+    <a href="https://github.com/pytorch/vision/commit/447c9374be54faf736439d909b99703f0d5bd4ff"><img alt="base" src="https://img.shields.io/badge/upstream-447c9374be54-blue"></a>
+    <img alt="card" src="https://img.shields.io/badge/measured%20on-RTX%204090-lightgrey">
+  </p>
+</div>
+
+> This is a fork of [pytorch/vision](https://github.com/pytorch/vision) at commit
+> [`447c9374be54`](https://github.com/pytorch/vision/commit/447c9374be54faf736439d909b99703f0d5bd4ff) with the AutoOptm patch applied on top.
+> The optimisation was found, measured and verified automatically by [AutoOptm](https://autooptm.com);
+> the patch is also kept at [`.autooptm/autooptm.patch`](.autooptm/autooptm.patch).
+
+## The result
+
+| | |
+|---|---|
+| **Command** | `python train.py --model resnet50 --fast` |
+| **Entry point** | `references/classification/train.py` |
+| **Unit measured** | one training step of ResNet-50 at the reference recipe's batch size (end to end) |
+| **Before (stock)** | 0.02293 s per unit |
+| **After (this tree, all switches default ON)** | 0.006424 s per unit |
+| **Speedup** | **3.44x** end to end, noise floor of the host 2.25% |
+| **Output** | verified against the frozen stock reference on the pinned inputs and on a held-out set the optimiser never saw |
+
+### What changed
+
+| File | Where | Gain (alone) |
+|---|---|---|
+| `references/classification/train.py` | train_one_epoch (new helper) | 1.16x |
+| `references/classification/train.py` | main() -> torch.optim.SGD | 1.1x |
+| `references/classification/train.py` | train_one_epoch | 1.22x |
+| `references/classification/train.py` | main() model + train_one_epoch + evaluate | 1.01x |
+| `references/classification/train.py` | _flush_metrics / train_one_epoch | 1.02x |
+| `references/classification/presets.py` | ClassificationPresetTrain.__init__ | 3.57x |
+| `references/classification/train.py` | train_one_epoch (new helper) | 3.57x |
+| `references/classification/train.py` | main() DataLoader construction | 3.57x |
+| `references/classification/train.py` | train_one_epoch | 3.57x |
+| `references/classification/train.py` | write_checkpoint / main() epoch loop | 3.57x |
+| `references/classification/train.py` | write_checkpoint / _clone_state / join_checkpoint | 3.57x |
+| `references/classification/train.py` | get_args_parser | 1x |
+
+## Reproduce
+
+```bash
+git clone https://github.com/autooptm/vision-ao.git
+cd vision-ao
+# set up exactly as upstream documents, then:
+python train.py --model resnet50 --fast
+```
+
+The diff against upstream is one commit: `git log -1 -p` shows it, and
+`git diff 447c9374be54` is the same patch as `.autooptm/autooptm.patch`.
+
+---
+
+<div align="center"><sub>Optimized by <a href="https://autooptm.com">AutoOptm</a> — point it at a repository, get back a verified speedup and the patch.</sub></div>
+
+---
+
 # torchvision
 
 [![total torchvision downloads](https://pepy.tech/badge/torchvision)](https://pepy.tech/project/torchvision)

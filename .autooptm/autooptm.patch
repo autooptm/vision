@@ -1,0 +1,434 @@
+diff --git a/references/classification/presets.py b/references/classification/presets.py
+index 8653957..0e9bcdd 100644
+--- a/references/classification/presets.py
++++ b/references/classification/presets.py
+@@ -32,7 +32,9 @@ class ClassificationPresetTrain:
+         random_erase_prob=0.0,
+         backend="pil",
+         use_v2=False,
++        opt_1=False,
+     ):
++        self.opt_1 = opt_1
+         T = get_module(use_v2)
+ 
+         transforms = []
+@@ -59,12 +61,13 @@ class ClassificationPresetTrain:
+         if backend == "pil":
+             transforms.append(T.PILToTensor())
+ 
+-        transforms.extend(
+-            [
+-                T.ToDtype(torch.float, scale=True) if use_v2 else T.ConvertImageDtype(torch.float),
+-                T.Normalize(mean=mean, std=std),
+-            ]
+-        )
++        if not opt_1:
++            transforms.extend(
++                [
++                    T.ToDtype(torch.float, scale=True) if use_v2 else T.ConvertImageDtype(torch.float),
++                    T.Normalize(mean=mean, std=std),
++                ]
++            )
+         if random_erase_prob > 0:
+             transforms.append(T.RandomErasing(p=random_erase_prob))
+ 
+diff --git a/references/classification/train.py b/references/classification/train.py
+index d52124f..32bc529 100644
+--- a/references/classification/train.py
++++ b/references/classification/train.py
+@@ -1,5 +1,7 @@
+ import datetime
+ import os
++import shutil
++import threading
+ import time
+ import warnings
+ 
+@@ -15,35 +17,192 @@ from torch.utils.data.dataloader import default_collate
+ from torchvision.transforms.functional import InterpolationMode
+ from transforms import get_mixup_cutmix
+ 
++# ---------------------------------------------------------------------------
++# ---------------------------------------------------------------------------
++FAST_OPTIONS = ("opt1", "opt2", "opt3", "opt4", "opt5",
++                "opt6", "opt7", "opt8", "opt9")
++IMAGENET_MEAN = (0.485, 0.456, 0.406)
++IMAGENET_STD = (0.229, 0.224, 0.225)
++
++
++def fast_set(args):
++    """The --fast options in effect, validated."""
++    want = {o.strip() for o in (args.fast or "").split(",") if o.strip()}
++    unknown = want - set(FAST_OPTIONS)
++    if unknown:
++        raise ValueError(f"--fast: unknown option(s) {sorted(unknown)}; known: {FAST_OPTIONS}")
++    return want
++
++
++class Opt2:
++
++    def __init__(self, device, mean=IMAGENET_MEAN, std=IMAGENET_STD):
++        self.mean = torch.tensor(mean, device=device).view(1, -1, 1, 1) * 255.0
++        self.std = torch.tensor(std, device=device).view(1, -1, 1, 1) * 255.0
++
++    def __call__(self, image):
++        if image.dtype == torch.uint8:
++            image = image.float().sub_(self.mean).div_(self.std)
++        return image
++
++
++class Opt3:
++
++    def __init__(self, model, criterion, optimizer, image, target, opt_10=None, warmup=3):
++        self.opt_10 = opt_10
++        self.opt_6 = torch.empty_like(image)
++        self.opt_7 = torch.empty_like(target)
++        self.opt_6.copy_(image)
++        self.opt_7.copy_(target)
++
++        saved = {k: v.detach().clone() for k, v in model.state_dict().items()}
++        saved_mom = {}
++        for group in optimizer.param_groups:
++            for p in group["params"]:
++                buf = optimizer.state.get(p, {}).get("momentum_buffer")
++                saved_mom[p] = None if buf is None else buf.detach().clone()
++
++        side = torch.cuda.Stream()
++        side.wait_stream(torch.cuda.current_stream())
++        with torch.cuda.stream(side):
++            for _ in range(warmup):
++                self._step(model, criterion, optimizer)
++        torch.cuda.current_stream().wait_stream(side)
++
++        self.graph = torch.cuda.CUDAGraph()
++        with torch.cuda.graph(self.graph):
++            self.opt_8, self.opt_9 = self._step(model, criterion, optimizer)
++
++        with torch.no_grad():
++            live = model.state_dict()
++            for k, v in saved.items():
++                live[k].copy_(v)
++            for p in model.parameters():
++                if p.grad is not None:
++                    p.grad.zero_()
++            for p, buf in saved_mom.items():
++                cur = optimizer.state.get(p, {}).get("momentum_buffer")
++                if cur is not None:
++                    cur.zero_() if buf is None else cur.copy_(buf)
++
++    def _step(self, model, criterion, optimizer):
++        optimizer.zero_grad(set_to_none=False)
++        with torch.cuda.amp.autocast(enabled=self.opt_10 is not None, dtype=self.opt_10,
++                                     cache_enabled=False):
++            output = model(self.opt_6)
++            loss = criterion(output, self.opt_7)
++        loss.backward()
++        optimizer.step()
++        return output, loss
++
++    def __call__(self, image, target):
++        if image.shape != self.opt_6.shape:
++            return None
++        self.opt_6.copy_(image)
++        self.opt_7.copy_(target)
++        self.graph.replay()
++        return self.opt_8, self.opt_9
++
++
++_OPT_5 = {"opt10": None}
++
++
++def _clone_state(obj):
++    if torch.is_tensor(obj):
++        return obj.detach().clone()
++    if isinstance(obj, dict):
++        return {k: _clone_state(v) for k, v in obj.items()}
++    if isinstance(obj, (list, tuple)):
++        return type(obj)(_clone_state(v) for v in obj)
++    return obj
++
++
++def join_checkpoint():
++    thread = _OPT_5["opt10"]
++    if thread is not None:
++        thread.join()
++        _OPT_5["opt10"] = None
++
++
++def write_checkpoint(checkpoint, epoch_path, latest_path, fast):
++    def _write():
++        utils.save_on_master(checkpoint, epoch_path)
++        if "opt8" in fast:
++            if utils.is_main_process():
++                shutil.copyfile(epoch_path, latest_path)
++        else:
++            utils.save_on_master(checkpoint, latest_path)
++
++    if "opt9" not in fast:
++        _write()
++        return
++    join_checkpoint()
++    thread = threading.Thread(target=_write, name="autooptm-checkpoint")
++    thread.start()
++    _OPT_5["opt10"] = thread
+ 
+-def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema=None, scaler=None):
++
++def _flush_metrics(metric_logger, optimizer, pending, block_start):
++    if not pending:
++        return
++    values = torch.stack([row for row, _ in pending]).cpu().tolist()
++    elapsed = max(time.time() - block_start, 1e-9)
++    images = sum(batch_size for _, batch_size in pending)
++    for (loss_v, acc1_v, acc5_v), (_, batch_size) in zip(values, pending):
++        metric_logger.update(loss=loss_v, lr=optimizer.param_groups[0]["lr"])
++        metric_logger.meters["acc1"].update(acc1_v, n=batch_size)
++        metric_logger.meters["acc5"].update(acc5_v, n=batch_size)
++        metric_logger.meters["img/s"].update(images / elapsed)
++    pending.clear()
++
++
++def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema=None, scaler=None,
++                    fast=frozenset(), normalize=None, opt_4=None):
+     model.train()
+     metric_logger = utils.MetricLogger(delimiter="  ")
+     metric_logger.add_meter("lr", utils.SmoothedValue(window_size=1, fmt="{value}"))
+     metric_logger.add_meter("img/s", utils.SmoothedValue(window_size=10, fmt="{value}"))
+ 
+     header = f"Epoch: [{epoch}]"
++    pending, block_start = [], time.time()
++    opt_10 = torch.bfloat16 if "opt2" in fast else None
+     for i, (image, target) in enumerate(metric_logger.log_every(data_loader, args.print_freq, header)):
+         start_time = time.time()
+-        image, target = image.to(device), target.to(device)
+-        with torch.cuda.amp.autocast(enabled=scaler is not None):
+-            output = model(image)
+-            loss = criterion(output, target)
+-
+-        optimizer.zero_grad()
+-        if scaler is not None:
+-            scaler.scale(loss).backward()
+-            if args.clip_grad_norm is not None:
+-                # we should unscale the gradients of optimizer's assigned params if do gradient clipping
+-                scaler.unscale_(optimizer)
+-                nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
+-            scaler.step(optimizer)
+-            scaler.update()
++        image = image.to(device, non_blocking=True)
++        target = target.to(device, non_blocking=True)
++        if normalize is not None:
++            image = normalize(image)
++        if "opt3" in fast:
++            image = image.contiguous(memory_format=torch.channels_last)
++
++        if opt_4 is not None and opt_4["enabled"] and opt_4["step"] is None:
++            opt_4["step"] = Opt3(
++                model, criterion, optimizer, image, target,
++                opt_10=opt_10)
++        step = opt_4["step"] if opt_4 is not None else None
++        captured = step(image, target) if step is not None else None
++        if captured is not None:
++            output, loss = captured
+         else:
+-            loss.backward()
+-            if args.clip_grad_norm is not None:
+-                nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
+-            optimizer.step()
++            with torch.cuda.amp.autocast(enabled=scaler is not None or opt_10 is not None,
++                                         dtype=opt_10):
++                output = model(image)
++                loss = criterion(output, target)
++
++            optimizer.zero_grad()
++            if scaler is not None:
++                scaler.scale(loss).backward()
++                if args.clip_grad_norm is not None:
++                    # we should unscale the gradients of optimizer's assigned params if do gradient clipping
++                    scaler.unscale_(optimizer)
++                    nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
++                scaler.step(optimizer)
++                scaler.update()
++            else:
++                loss.backward()
++                if args.clip_grad_norm is not None:
++                    nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
++                optimizer.step()
+ 
+         if model_ema and i % args.model_ema_steps == 0:
+             model_ema.update_parameters(model)
+@@ -53,13 +212,23 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, arg
+ 
+         acc1, acc5 = utils.accuracy(output, target, topk=(1, 5))
+         batch_size = image.shape[0]
+-        metric_logger.update(loss=loss.item(), lr=optimizer.param_groups[0]["lr"])
+-        metric_logger.meters["acc1"].update(acc1.item(), n=batch_size)
+-        metric_logger.meters["acc5"].update(acc5.item(), n=batch_size)
+-        metric_logger.meters["img/s"].update(batch_size / (time.time() - start_time))
++        if "opt5" in fast:
++            pending.append((torch.stack((loss.detach(), acc1, acc5)), batch_size))
++            # flush ON the print cadence, i=0 included: log_every prints its
++            # first line right after step 0, and a meter with no samples yet
++            # divides by zero in SmoothedValue.global_avg.
++            if i % args.print_freq == 0:
++                _flush_metrics(metric_logger, optimizer, pending, block_start)
++                block_start = time.time()
++        else:
++            metric_logger.update(loss=loss.item(), lr=optimizer.param_groups[0]["lr"])
++            metric_logger.meters["acc1"].update(acc1.item(), n=batch_size)
++            metric_logger.meters["acc5"].update(acc5.item(), n=batch_size)
++            metric_logger.meters["img/s"].update(batch_size / (time.time() - start_time))
++    _flush_metrics(metric_logger, optimizer, pending, block_start)
+ 
+ 
+-def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix=""):
++def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="", channels_last=False):
+     model.eval()
+     metric_logger = utils.MetricLogger(delimiter="  ")
+     header = f"Test: {log_suffix}"
+@@ -69,6 +238,8 @@ def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="
+         for image, target in metric_logger.log_every(data_loader, print_freq, header):
+             image = image.to(device, non_blocking=True)
+             target = target.to(device, non_blocking=True)
++            if channels_last:
++                image = image.contiguous(memory_format=torch.channels_last)
+             output = model(image)
+             loss = criterion(output, target)
+ 
+@@ -147,6 +318,7 @@ def load_data(traindir, valdir, args):
+                 augmix_severity=augmix_severity,
+                 backend=args.backend,
+                 use_v2=args.use_v2,
++                opt_1="opt6" in fast_set(args),
+             ),
+         )
+         if args.cache_dataset:
+@@ -202,6 +374,7 @@ def load_data(traindir, valdir, args):
+ 
+ 
+ def main(args):
++    fast = fast_set(args)
+     if args.output_dir:
+         utils.mkdir(args.output_dir)
+ 
+@@ -216,6 +389,7 @@ def main(args):
+     else:
+         torch.backends.cudnn.benchmark = True
+ 
++    print(f"[autooptm] --fast options in effect: {sorted(fast) or 'none (stock path)'}")
+     train_dir = os.path.join(args.data_path, "train")
+     val_dir = os.path.join(args.data_path, "val")
+     dataset, dataset_test, train_sampler, test_sampler = load_data(train_dir, val_dir, args)
+@@ -232,6 +406,13 @@ def main(args):
+     else:
+         collate_fn = default_collate
+ 
++    loader_kwargs = {}
++    if "opt7" in fast and args.workers > 0:
++        loader_kwargs = {"prefetch_factor": 6,
++                         # only when another epoch will actually reuse them: at
++                         # --epochs 1 a live train pool just contends with the
++                         # eval pool for the same cores
++                         "persistent_workers": args.epochs - args.start_epoch > 1}
+     data_loader = torch.utils.data.DataLoader(
+         dataset,
+         batch_size=args.batch_size,
+@@ -239,14 +420,21 @@ def main(args):
+         num_workers=args.workers,
+         pin_memory=True,
+         collate_fn=collate_fn,
++        **loader_kwargs,
+     )
++    test_workers = args.workers
++    if "opt7" in fast and args.workers > 0:
++        test_batches = max(1, (len(dataset_test) + args.batch_size - 1) // args.batch_size)
++        test_workers = min(args.workers, test_batches)
+     data_loader_test = torch.utils.data.DataLoader(
+-        dataset_test, batch_size=args.batch_size, sampler=test_sampler, num_workers=args.workers, pin_memory=True
++        dataset_test, batch_size=args.batch_size, sampler=test_sampler, num_workers=test_workers, pin_memory=True
+     )
+ 
+     print("Creating model")
+     model = torchvision.models.get_model(args.model, weights=args.weights, num_classes=num_classes)
+     model.to(device)
++    if "opt3" in fast:
++        model = model.to(memory_format=torch.channels_last)
+ 
+     if args.distributed and args.sync_bn:
+         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+@@ -274,6 +462,7 @@ def main(args):
+             momentum=args.momentum,
+             weight_decay=args.weight_decay,
+             nesterov="nesterov" in opt_name,
++            **({"fused": True} if "opt4" in fast else {}),
+         )
+     elif opt_name == "rmsprop":
+         optimizer = torch.optim.RMSprop(
+@@ -360,16 +549,26 @@ def main(args):
+             evaluate(model, criterion, data_loader_test, device=device)
+         return
+ 
++    normalize = Opt2(device) if "opt6" in fast else None
++    opt_4 = {"enabled": "opt1" in fast, "step": None}
++    if opt_4["enabled"]:
++        if scaler is not None:
++            print("[autooptm] --amp is on, so option opt1 is disabled. "
++                  "Use `--fast opt2,...` instead.")
++            opt_4["enabled"] = False
++        elif args.clip_grad_norm is not None or model_ema is not None:
++            print("[autooptm] --clip-grad-norm / --model-ema are on, so option opt1 "
++                  "is disabled.")
++            opt_4["enabled"] = False
++
+     print("Start training")
+     start_time = time.time()
+     for epoch in range(args.start_epoch, args.epochs):
+         if args.distributed:
+             train_sampler.set_epoch(epoch)
+-        train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema, scaler)
++        train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema, scaler,
++                        fast=fast, normalize=normalize, opt_4=opt_4)
+         lr_scheduler.step()
+-        evaluate(model, criterion, data_loader_test, device=device)
+-        if model_ema:
+-            evaluate(model_ema, criterion, data_loader_test, device=device, log_suffix="EMA")
+         if args.output_dir:
+             checkpoint = {
+                 "model": model_without_ddp.state_dict(),
+@@ -382,9 +581,18 @@ def main(args):
+                 checkpoint["model_ema"] = model_ema.state_dict()
+             if scaler:
+                 checkpoint["scaler"] = scaler.state_dict()
+-            utils.save_on_master(checkpoint, os.path.join(args.output_dir, f"model_{epoch}.pth"))
+-            utils.save_on_master(checkpoint, os.path.join(args.output_dir, "checkpoint.pth"))
++            if "opt9" in fast:
++                checkpoint = _clone_state(checkpoint)
++            write_checkpoint(checkpoint,
++                             os.path.join(args.output_dir, f"model_{epoch}.pth"),
++                             os.path.join(args.output_dir, "checkpoint.pth"), fast)
++        evaluate(model, criterion, data_loader_test, device=device,
++                 channels_last="opt3" in fast)
++        if model_ema:
++            evaluate(model_ema, criterion, data_loader_test, device=device, log_suffix="EMA",
++                     channels_last="opt3" in fast)
+ 
++    join_checkpoint()
+     total_time = time.time() - start_time
+     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+     print(f"Training time {total_time_str}")
+@@ -520,6 +728,16 @@ def get_args_parser(add_help=True):
+     parser.add_argument("--weights", default=None, type=str, help="the weights enum name to load")
+     parser.add_argument("--backend", default="PIL", type=str.lower, help="PIL or tensor - case insensitive")
+     parser.add_argument("--use-v2", action="store_true", help="Use V2 transforms")
++    parser.add_argument(
++        "--fast",
++        default=",".join(FAST_OPTIONS),
++        type=str,
++        help="[autooptm] comma-separated options, all on by default: "
++        + ", ".join(FAST_OPTIONS)
++        + ". Pass --fast '' to restore the stock path exactly, or drop any single option "
++        "from the list. `opt1` and `opt2` are disabled automatically when --amp, "
++        "--clip-grad-norm or --model-ema make them unsafe.",
++    )
+     return parser
+ 
+ 

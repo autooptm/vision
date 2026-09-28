@@ -32,7 +32,9 @@ class ClassificationPresetTrain:
         random_erase_prob=0.0,
         backend="pil",
         use_v2=False,
+        opt_1=False,
     ):
+        self.opt_1 = opt_1
         T = get_module(use_v2)
 
         transforms = []
@@ -59,12 +61,13 @@ class ClassificationPresetTrain:
         if backend == "pil":
             transforms.append(T.PILToTensor())
 
-        transforms.extend(
-            [
-                T.ToDtype(torch.float, scale=True) if use_v2 else T.ConvertImageDtype(torch.float),
-                T.Normalize(mean=mean, std=std),
-            ]
-        )
+        if not opt_1:
+            transforms.extend(
+                [
+                    T.ToDtype(torch.float, scale=True) if use_v2 else T.ConvertImageDtype(torch.float),
+                    T.Normalize(mean=mean, std=std),
+                ]
+            )
         if random_erase_prob > 0:
             transforms.append(T.RandomErasing(p=random_erase_prob))
 
